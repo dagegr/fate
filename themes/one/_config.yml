@@ -93,8 +93,8 @@ music:
 # Whether to display the videos.
 # 是否在首页显示视频.
 video:
-  enable: true
-  showTitle: true
+  enable: false
+  showTitle: false
   title: video
   url: https://www.bilibili.com/video/BV1tx41157wv
   pic:
