@@ -11,7 +11,6 @@ author: 人斩
 language: zh-CN
 timezone: ''
 
-$ hexo new page about
 # URL
 ## If your site is put in a subdirectory, set url as 'http://yoursite.com/child' and root as '/child/'
 url: http://yoursite.com
@@ -96,7 +95,7 @@ ignore:
 # Extensions
 ## Plugins: https://hexo.io/plugins/
 ## Themes: https://hexo.io/themes/
-theme: cards
+theme: next
 
 # 永久链接
 abbrlink:
