@@ -80,20 +80,33 @@ jobs:
         if: ${{ !inputs.boot_only }}
         run: |
           python3 - <<'PY'
+          import subprocess
+
           p = 'rootfs/distros/arch.sh'
           s = open(p).read()
 
           # 1) pacman 的镜像列表固定到与 tarball 相同的单节点。
           #    mirror.archlinuxarm.org 是轮询 DNS，各后端同步进度不一，
           #    会出现 db 里有、文件已被替换 -> 404。
+          #    注意：必须整行替换（^Server = .*），否则原行的 /$arch/$repo
+          #    尾巴会残留，拼成 .../aarch64/core/aarch64/core 全部 404。
+          SED = (
+              "s|^Server = .*|Server = https://de3.mirror.archlinuxarm.org/$arch/$repo|"
+          )
+          SAMPLE = 'Server = http://mirror.archlinuxarm.org/$arch/$repo\n'
+          EXPECT = 'Server = https://de3.mirror.archlinuxarm.org/$arch/$repo\n'
+          got = subprocess.run(
+              ['sed', '-E', SED], input=SAMPLE, capture_output=True, text=True, check=True
+          ).stdout
+          assert got == EXPECT, f'镜像源改写自检失败: {got!r}'
+
           anchor = '\tlocal root="$1"; shift\n'
           assert anchor in s, 'arch.sh 锚点不存在，上游结构可能已变'
-          mirror = (
-              "\tsed -i 's|^Server = .*mirror\\.archlinuxarm\\.org"
-              "|Server = https://de3.mirror.archlinuxarm.org/$arch/$repo|' "
-              '"$root/etc/pacman.d/mirrorlist" || true\n'
-          )
           if 'de3.mirror.archlinuxarm.org/$arch/$repo' not in s:
+              mirror = (
+                  "\tsed -E -i '" + SED + "' \"$root/etc/pacman.d/mirrorlist\" || true\n"
+                  "\tgrep -H '^Server' \"$root/etc/pacman.d/mirrorlist\" || true\n"
+              )
               s = s.replace(anchor, anchor + mirror, 1)
 
           # 2) 装包失败时强刷数据库再试一次
@@ -129,15 +142,26 @@ jobs:
           # 浅克隆下分支 ref 未必完整，直接传 commit sha；DTB 已编进 Image
           KREF="$(git -C "$GITHUB_WORKSPACE/linux" rev-parse HEAD)"
           echo "kernel commit: $KREF"
-          sudo -E bash ./build.sh \
-            --device "$DEVICE" \
-            --distro "${{ inputs.distro }}" \
-            --ui "${{ inputs.ui }}" \
-            --baseband off \
-            --kernel-repo "$GITHUB_WORKSPACE/linux" \
-            --kernel-ref "$KREF" \
-            --out "$GITHUB_WORKSPACE/out" \
-            --jobs "$(nproc)"
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          LOG="$GITHUB_WORKSPACE/out/build.log"
+          # 构建输出重定向到文件：GitHub 日志接口超过 4MB 会截断，
+          # 之前出错时日志尾部被吃掉，完全看不到真实原因。
+          if sudo -E bash ./build.sh \
+              --device "$DEVICE" \
+              --distro "${{ inputs.distro }}" \
+              --ui "${{ inputs.ui }}" \
+              --baseband off \
+              --kernel-repo "$GITHUB_WORKSPACE/linux" \
+              --kernel-ref "$KREF" \
+              --out "$GITHUB_WORKSPACE/out" \
+              --jobs "$(nproc)" >"$LOG" 2>&1; then
+            echo "=== 构建成功，日志最后 30 行 ==="
+            tail -n 30 "$LOG"
+          else
+            echo "::error::build.sh 失败，以下为日志最后 200 行"
+            tail -n 200 "$LOG"
+            exit 1
+          fi
           cd "$GITHUB_WORKSPACE/out"
           sha256sum -c SHA256SUMS || echo "::warning::SHA256SUMS 未全部通过校验，请人工核对"
           ls -lh
@@ -195,10 +219,11 @@ jobs:
           ls -lh
 
       - name: 上传产物
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: xaga-${{ inputs.distro }}-${{ inputs.ui }}
           path: |
             out/*
             initramfs/initramfs.cpio.lz4
-          if-no-files-found: error
+          if-no-files-found: warn
