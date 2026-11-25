@@ -1,0 +1,159 @@
+name: xaga linux build
+
+# 在 GitHub Actions 上构建红米 Note 11T Pro (xaga) 的主线 Linux：
+#   1) out/boot.img                      -> fastboot flash boot
+#   2) out/rootfs-xaga-<distro>-*.img    -> fastboot flash userdata
+# 两者来自同一个内核源码，编号与符号版本一定匹配。
+
+on:
+  workflow_dispatch:
+    inputs:
+      distro:
+        description: "rootfs 发行版"
+        type: choice
+        options: [arch, mobian, nura]
+        default: arch
+      ui:
+        description: "桌面环境（Denial 之后自己装，这里只是首启用的临时会话）"
+        type: choice
+        options: [phosh, console, gnome, kde, xfce]
+        default: phosh
+      boot_only:
+        description: "只编内核 + boot.img（跳过 rootfs，快很多）"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  KBRANCH: 7.2-mt6895-xiaomi-xaga
+  DEVICE: xaga
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    steps:
+      - name: 腾出磁盘空间
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
+          df -h /
+
+      - name: 检出内核
+        uses: actions/checkout@v4
+        with:
+          repository: MT6895-Mainline/linux
+          ref: 7.2-mt6895-xiaomi-xaga
+          path: linux
+
+      - name: 检出 rootfs 构建脚本
+        if: ${{ !inputs.boot_only }}
+        uses: actions/checkout@v4
+        with:
+          repository: MT6895-Mainline/rootfs
+          path: rootfs
+
+      - name: 检出 xaga initramfs
+        uses: actions/checkout@v4
+        with:
+          repository: MT6895-Mainline/initramfs
+          ref: xaga-mt6895
+          path: initramfs
+
+      - name: 安装构建依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            mmdebstrap arch-test debian-archive-keyring qemu-user-static binfmt-support \
+            libarchive-tools gnupg e2fsprogs android-sdk-libsparse-utils pigz zstd kmod rsync \
+            build-essential bc flex bison python3 multipath-tools \
+            clang lld llvm binutils-aarch64-linux-gnu gcc-aarch64-linux-gnu cpio lz4 \
+            libssl-dev libelf-dev libncurses-dev dwarves git curl ca-certificates xz-utils
+          sudo update-binfmts --enable qemu-aarch64
+          sudo arch-test arm64
+          sudo git config --system --add safe.directory "$GITHUB_WORKSPACE/linux"
+          sudo git config --system --add safe.directory "$GITHUB_WORKSPACE/rootfs"
+
+      - name: 构建内核 + rootfs
+        if: ${{ !inputs.boot_only }}
+        run: |
+          set -euo pipefail
+          cd rootfs
+          # 浅克隆下分支 ref 未必完整，直接传 commit sha；DTB 已编进 Image
+          KREF="$(git -C "$GITHUB_WORKSPACE/linux" rev-parse HEAD)"
+          echo "kernel commit: $KREF"
+          sudo -E bash ./build.sh \
+            --device "$DEVICE" \
+            --distro "${{ inputs.distro }}" \
+            --ui "${{ inputs.ui }}" \
+            --baseband off \
+            --kernel-repo "$GITHUB_WORKSPACE/linux" \
+            --kernel-ref "$KREF" \
+            --out "$GITHUB_WORKSPACE/out" \
+            --jobs "$(nproc)"
+          cd "$GITHUB_WORKSPACE/out"
+          sha256sum -c SHA256SUMS || echo "::warning::SHA256SUMS 未全部通过校验，请人工核对"
+          ls -lh
+
+      - name: 仅构建内核 Image
+        if: ${{ inputs.boot_only }}
+        run: |
+          set -euo pipefail
+          cd linux
+          ARCH=arm64 scripts/kconfig/merge_config.sh -m \
+            arch/arm64/configs/defconfig arch/arm64/configs/xaga.config
+          make ARCH=arm64 LLVM=1 olddefconfig
+          make ARCH=arm64 LLVM=1 -j"$(nproc)" Image
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          cp arch/arm64/boot/Image "$GITHUB_WORKSPACE/out/Image-$DEVICE-${{ inputs.distro }}"
+
+      - name: 构建 initramfs
+        run: |
+          make -C initramfs BOOT_PARTITION=/dev/sdc86
+          ls -lh initramfs/initramfs.cpio.lz4
+
+      - name: 打包 boot.img
+        run: |
+          set -euo pipefail
+          if git clone --depth 1 https://github.com/osm0sis/mkbootimg.git tools-mkbootimg \
+             && make -C tools-mkbootimg -j"$(nproc)"; then
+            MK=tools-mkbootimg/mkbootimg
+          else
+            echo "::warning::C 版 mkbootimg 编译失败，改用 AOSP python 实现"
+            git clone --depth 1 https://github.com/aosp-mirror/platform_system_tools_mkbootimg.git tools-mkpy
+            MK="python3 tools-mkpy/mkbootimg.py"
+          fi
+
+          IMG="$(ls out/Image-$DEVICE-* | head -1)"
+          echo "使用内核: $IMG"
+          gzip -n -9 -c "$IMG" > Image.gz
+
+          # DTB 已编进 Image（arch/arm64/kernel/xaga-dtb.o），这里不传 --dtb
+          $MK \
+            --kernel Image.gz \
+            --ramdisk initramfs/initramfs.cpio.lz4 \
+            --base 0x3fff8000 \
+            --kernel_offset 0x8000 \
+            --pagesize 4096 \
+            --ramdisk_offset 0x26f08000 \
+            --tags_offset 0x07c88000 \
+            --dtb_offset 0x07c88000 \
+            --header_version 4 \
+            --os_version 16.0.0 \
+            --os_patch_level 2026-08 \
+            -o out/boot.img
+
+          cd out
+          sha256sum boot.img Image-$DEVICE-* > BOOT-SHA256SUMS
+          ls -lh
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: xaga-${{ inputs.distro }}-${{ inputs.ui }}
+          path: |
+            out/*
+            initramfs/initramfs.cpio.lz4
+          if-no-files-found: error
