@@ -186,12 +186,16 @@ jobs:
       - name: 打包 boot.img
         run: |
           set -euo pipefail
+          # osm0sis 的 Makefile 带 -Werror，GCC 14 会对 libmincrypt/rsa.c
+          # 报 stringop-overflow 从而中断编译；这里去掉 -Werror 即可。
           if git clone --depth 1 https://github.com/osm0sis/mkbootimg.git tools-mkbootimg \
+             && sed -i 's/-Werror//g' tools-mkbootimg/Makefile tools-mkbootimg/*/Makefile 2>/dev/null \
              && make -C tools-mkbootimg -j"$(nproc)"; then
             MK=tools-mkbootimg/mkbootimg
           else
-            echo "::warning::C 版 mkbootimg 编译失败，改用 AOSP python 实现"
-            git clone --depth 1 https://github.com/aosp-mirror/platform_system_tools_mkbootimg.git tools-mkpy
+            echo "::warning::C 版 mkbootimg 编译失败，改用 AOSP/LineageOS python 实现"
+            git clone --depth 1 -b lineage-23.0 \
+              https://github.com/LineageOS/android_system_tools_mkbootimg.git tools-mkpy
             MK="python3 tools-mkpy/mkbootimg.py"
           fi
 
