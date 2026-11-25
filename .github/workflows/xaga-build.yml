@@ -16,8 +16,8 @@ on:
       ui:
         description: "桌面环境（Denial 之后自己装，这里只是首启用的临时会话）"
         type: choice
-        options: [phosh, console, gnome, kde, xfce]
-        default: phosh
+        options: [console, phosh, gnome, kde, xfce]
+        default: console
       boot_only:
         description: "只编内核 + boot.img（跳过 rootfs，快很多）"
         type: boolean
@@ -227,7 +227,15 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: xaga-${{ inputs.distro }}-${{ inputs.ui }}
+          # 只传刷机真正需要的文件。out/ 里同时有 3.9G 的 sparse.img 和 1.4G 的
+          # .img.gz，两个都传会让产物翻倍到 2.8G，而国内下载 GitHub 产物极慢。
           path: |
-            out/*
+            out/Image-*
+            out/dtb-*
+            out/boot.img
+            out/BOOT-SHA256SUMS
+            out/KERNEL-INFO-*
+            out/build.log
+            out/*.img.gz
             initramfs/initramfs.cpio.lz4
           if-no-files-found: warn
