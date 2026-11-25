@@ -76,6 +76,51 @@ jobs:
           sudo git config --system --add safe.directory "$GITHUB_WORKSPACE/linux"
           sudo git config --system --add safe.directory "$GITHUB_WORKSPACE/rootfs"
 
+      - name: 修补 Arch 镜像源（规避镜像轮询导致的 404）
+        if: ${{ !inputs.boot_only }}
+        run: |
+          python3 - <<'PY'
+          p = 'rootfs/distros/arch.sh'
+          s = open(p).read()
+
+          # 1) pacman 的镜像列表固定到与 tarball 相同的单节点。
+          #    mirror.archlinuxarm.org 是轮询 DNS，各后端同步进度不一，
+          #    会出现 db 里有、文件已被替换 -> 404。
+          anchor = '\tlocal root="$1"; shift\n'
+          assert anchor in s, 'arch.sh 锚点不存在，上游结构可能已变'
+          mirror = (
+              "\tsed -i 's|^Server = .*mirror\\.archlinuxarm\\.org"
+              "|Server = https://de3.mirror.archlinuxarm.org/$arch/$repo|' "
+              '"$root/etc/pacman.d/mirrorlist" || true\n'
+          )
+          if 'de3.mirror.archlinuxarm.org/$arch/$repo' not in s:
+              s = s.replace(anchor, anchor + mirror, 1)
+
+          # 2) 装包失败时强刷数据库再试一次
+          old = ('\tdistro_chroot "$root" pacman -Syu --disable-sandbox '
+                 '--needed --noconfirm $*\n')
+          new = ('\tif ! distro_chroot "$root" pacman -Syu --disable-sandbox '
+                 '--needed --noconfirm $*; then\n'
+                 '\t\techo "pacman failed, refreshing db and retrying"\n'
+                 '\t\tdistro_chroot "$root" pacman -Syy --disable-sandbox || true\n'
+                 '\t\tdistro_chroot "$root" pacman -Syu --disable-sandbox '
+                 '--needed --noconfirm $*\n'
+                 '\tfi\n')
+          assert old in s, 'pacman 调用行未找到'
+          s = s.replace(old, new, 1)
+
+          # 3) 通用内核删不掉也不该中断构建
+          s = s.replace(
+              '\tdistro_chroot "$root" pacman -R --noconfirm linux-aarch64\n',
+              '\tdistro_chroot "$root" pacman -R --noconfirm linux-aarch64 || true\n',
+              1,
+          )
+
+          open(p, 'w').write(s)
+          print('arch.sh patched')
+          PY
+          sed -n '/distro_install_packages()/,/^}/p' rootfs/distros/arch.sh
+
       - name: 构建内核 + rootfs
         if: ${{ !inputs.boot_only }}
         run: |
